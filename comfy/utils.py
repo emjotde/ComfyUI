@@ -39,6 +39,30 @@ import warnings
 
 MMAP_TORCH_FILES = args.mmap_torch_files
 DISABLE_MMAP = args.disable_mmap
+PREFAULT_MODELS = args.prefault_models if hasattr(args, 'prefault_models') else False
+
+
+def prefault_file(path, chunk_size=4 * 1024 * 1024):
+    """Read entire file sequentially to pre-fault pages into RAM before mmap access."""
+    file_size = os.path.getsize(path)
+    file_name = os.path.basename(path)
+    total_mb = file_size / (1024 * 1024)
+    read_bytes = 0
+    last_pct = -10
+    t0 = time.monotonic()
+    logging.info("Pre-faulting %s (%.0f MB)...", file_name, total_mb)
+    with open(path, "rb") as f:
+        while chunk := f.read(chunk_size):
+            read_bytes += len(chunk)
+            pct = int(read_bytes / file_size * 100)
+            if pct - last_pct >= 10:
+                elapsed = time.monotonic() - t0
+                throughput = (read_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+                logging.info("  Prefault %s: %d/%d MB (%d%%) @ %.0f MB/s", file_name, read_bytes // (1024*1024), int(total_mb), pct, throughput)
+                last_pct = pct
+    elapsed = time.monotonic() - t0
+    throughput = total_mb / elapsed if elapsed > 0 else 0
+    logging.info("  Prefault %s: done in %.1fs (%.0f MB/s)", file_name, elapsed, throughput)
 
 
 if True:  # ckpt/pt file whitelist for safe loading of old sd files
@@ -130,6 +154,8 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
                 if not return_metadata:
                     metadata = None
             else:
+                if PREFAULT_MODELS:
+                    prefault_file(ckpt)
                 with safetensors.safe_open(ckpt, framework="pt", device=device.type) as f:
                     sd = {}
                     for k in f.keys():
